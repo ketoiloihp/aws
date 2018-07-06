@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'This instance will be installed some base packages'
+Mappings:
+  RegionMap:
+    ap-northeast-1:
+      AMI: ami-25bd2743
+    ap-northeast-2:
+      AMI: ami-7248e81c
+    ap-southeast-1:
+      AMI: ami-d2fa88ae
+    ap-southeast-2:
+      AMI: ami-b6bb47d4
+
+Parameters:
+  KeyPairName:
+    Description: 'choose one keypair exist'
+    Type: AWS::EC2::KeyPair::KeyName
+  VpcId:
+    Description: 'VPCId indentifier'
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Description: 'SubnetIds indentifier'
+    Type: 'AWS::EC2::Subnet::Id'
+
+Resources:
+  EC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName} EC2 security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: <my_ip>/32
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+  MyEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              ntp: []
+          services:
+            sysvinit:
+              ntpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      InstanceType: t2.micro
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetId
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}
+      SecurityGroupIds: 
+        - !Ref EC2SecurityGroup
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -exv
+          # Install CFN helpers
+          yum update -y
+          yum install -y wget epel-release
+          yum update -y
+          yum install -y awscli python-pip lzop
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # replace the settings for auto update security patch
+          yum install -y yum-cron
+          systemctl enable yum-cron
+          systemctl start yum-cron
+          sed -i "s/update_cmd = default/update_cmd = security/" /etc/yum/yum-cron.conf
+          sed -i "s/apply_updates = no/apply_updates = yes/" /etc/yum/yum-cron.conf
+          systemctl restart yum-cron
+          # Install docker
+          wget -qO- https://get.docker.com/ | sh
+          usermod -aG docker $(whoami)
+          systemctl enable docker.service
+          systemctl start docker.service
+          pip install docker-compose
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource MyEC2Instance --region ${AWS::Region}
+
+Outputs:
+  MyEc2Instance:
+    Description: 'CentOS 7 install some base packages'
+    Value: !Ref MyEC2Instance

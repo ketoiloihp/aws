@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'this is example create a simple application running php'
+Mappings:
+  RegionMap:
+    ap-northeast-1:
+      AMI: ami-25bd2743
+    ap-northeast-2:
+      AMI: ami-7248e81c
+    ap-southeast-1:
+      AMI: ami-d2fa88ae
+    ap-southeast-2:
+      AMI: ami-b6bb47d4
+Parameters:
+  Ec2KeyName:
+    Description: 'choose one keypair exist'
+    Type: AWS::EC2::KeyPair::KeyName
+  WelcomeMessage:
+    Description: 'Input text for display welcome message'
+    Type: String
+    MinLength: 1
+    Default: 'WelcomeMessage'
+  Ec2SubnetId:
+    Description: Subnet Identifier
+    Type: AWS::EC2::Subnet::Id
+  Ec2VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC Identifier
+  KeygenText:
+    Type: String
+Resources:
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Enable HTTP access via port 80 locked down to the load balancer + SSH access"
+      VpcId: !Ref Ec2VpcId
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - CidrIp: <my_ip>/32
+        FromPort: '22'
+        IpProtocol: tcp
+        ToPort: '22'
+  WebServerInstance:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              ntp: []
+              httpd: []
+              php: []
+          commands:
+            YumUpdate:
+              command: 'echo "Test" > /tmp/a.dump'
+          files:
+            '/var/www/html/index.php':
+              content: !Sub |
+                <?php
+                  echo "<h1>AWS CloudFormation sample PHP application 01</h1>";
+                  echo "<p>${WelcomeMessage} 01</p>";?>
+          services:
+            sysvinit:
+              ntpd:
+                enabled: true
+                ensureRunning: true
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref Ec2KeyName
+      SubnetId: !Ref Ec2SubnetId
+      SecurityGroupIds: 
+      - !Ref WebServerSecurityGroup
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sv1'
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -v
+          echo "${KeygenText}">> \
+            /home/centos/.ssh/authorized_keys
+          yum update -y
+          # Install CFN helpers
+          yum install -y epel-release awscli python-pip lzop
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+  WebServerInstance2:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              ntp: []
+              httpd: []
+              php: []
+          commands:
+            YumUpdate:
+              command: 'echo "Test" > /tmp/a.dump'
+          files:
+            '/var/www/html/index.php':
+              content: !Sub |
+                <?php
+                  echo "<h1>AWS CloudFormation sample PHP application 02</h1>";
+                  echo "<p>${WelcomeMessage} 02</p>";?>
+          services:
+            sysvinit:
+              ntpd:
+                enabled: true
+                ensureRunning: true
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref Ec2KeyName
+      SecurityGroupIds: 
+      - !Ref WebServerSecurityGroup
+      SubnetId: !Ref Ec2SubnetId
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sv2'
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -v
+          echo "${KeygenText}">> \
+            /home/centos/.ssh/authorized_keys
+          yum update -y
+          # Install CFN helpers
+          yum install -y epel-release awscli python-pip lzop
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance2 --region ${AWS::Region}
+  ElasticLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancing::LoadBalancer'
+    Properties:
+      Instances:
+        - !Ref WebServerInstance
+        - !Ref WebServerInstance2
+      Subnets:
+        - !Ref Ec2SubnetId
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      Listeners:
+        - LoadBalancerPort: '80'
+          InstancePort: '80'
+          Protocol: HTTP
+      HealthCheck:
+        Target: !Join
+          - ''
+          - - 'HTTP:'
+            - '80'
+            - /
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+
+Outputs:
+  ElasticLoadBalancer:
+    Description: 'ElasticLoadBalancer'
+    Value: !Ref ElasticLoadBalancer
+  WebsiteURL:
+      Value: !Join
+        - ''
+        - - 'http://'
+          - !GetAtt ElasticLoadBalancer.DNSName

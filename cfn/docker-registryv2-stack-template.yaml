@@ -1,0 +1,518 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'CloudFormation: Create private docker registry with loadbalancing'
+Mappings:
+  RegionMap:
+    ap-southeast-1:
+      AMI: ami-a6b7cb4c
+Parameters:
+  ApplicationHostName:
+    Description: Application Host Name
+    Type: String
+    Default: registry.youdomain.com
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+    - t2.nano
+    - t2.micro
+    - t2.small
+    - t2.medium
+    - t2.large
+    - t2.xlarge
+    - t2.2xlarge
+    - m3.large
+    - m3.xlarge
+    - m3.2xlarge
+    - m4.large
+    - m4.xlarge
+    - m4.2xlarge
+  KeyPairName:
+    Description: 'Choose an existing EC2 KeyPair to enable SSH access to the instances'
+    Type: AWS::EC2::KeyPair::KeyName
+  DockerImage:
+    Description: 'Path of the Docker Registry image to use (format: ''[<registry>[:<port>]/]<repository>[:<version>]'')'
+    Type: String
+    Default: registry:2.6.2
+  RegistryAuth:
+    Description: Comma-delimited list of htpasswd strings that grant access to the registry (e.g., 'user1:$apr1$BspgNsum$8ZdGQ/KXRFccnlRXF6StP.')
+    Type: CommaDelimitedList
+  SSLCertificateARN:
+    Description: ARN of an existing SSL certificate on AWS (e.g., 'arn:aws:iam::123456789:server-certificate/docker.mycompany.com')
+    Type: String
+  S3BucketName:
+    Description: Bucket to use for Docker images (e.g., 'yourname-repo')
+    Type: String
+    Default: 'yourname-repo'
+  MinSize:
+     Description: Minimum number of instances in the group
+     Type: Number
+     Default: 1
+  MaxSize:
+    Description: Maximum number of instances in the group
+    Type: Number
+    Default: 2
+  ThresholdCPUHigh:
+    Description: Launch new instances when CPU utilization is over this threshold
+    Type: Number
+    Default: 70
+  ThresholdCPUTooHigh:
+    Description: Send an alert when CPU utilization is over this threshold
+    Type: Number
+    Default: 85
+  ThresholdCPULow:
+    Description: Remove instances when CPU utilization is under this threshold
+    Type: Number
+    Default: 30
+  ThresholdMinutes:
+    Description: Launch new instances when over the CPU threshold for this many minutes
+    Type: Number
+    Default: 5
+  AdminEmail:
+    Description: 'The email address of the admin who receives alerts.'
+    Type: String
+    Default: 'your_email@yourdomain.com'
+  VpcId:
+    Description: 'VPC where load balancer and instance will launch'
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Description: 'Subnet IDs where instances can be launched'
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  KeygenText:
+    Description: 'add a new SSH key to the instance'
+    Type: String
+
+Resources:
+  Alerts:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+      - Endpoint: !Ref AdminEmail
+        Protocol: email
+  IAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+      - PolicyName: S3Access
+        PolicyDocument:
+          Statement:
+          - Action: s3:*
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: S3BucketName
+          - Action: s3:*
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:s3:::'
+                - Ref: S3BucketName
+                - "/*"
+      - PolicyName: IAMAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            NotAction: iam:*
+            Resource: "*"
+  HostKeys:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName:
+        Ref: IAMUser
+  # configuration security group for loadbalancer
+  ELBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName} ELB security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      - CidrIp: 0.0.0.0/0
+        FromPort: 443
+        IpProtocol: tcp
+        ToPort: 443
+  # configuration security group for ec2
+  EC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName} EC2 security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: <my_ip>/32
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      - FromPort: 80
+        IpProtocol: tcp
+        SourceSecurityGroupId: !Ref ELBSecurityGroup
+        ToPort: 80
+  # The load balancer needs to run in public subnets because our users should be able to access the app from the Internet.
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref AWS::StackName
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ELBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: 'docker-registry-load-balancer'
+  # The load balancer should listen on port 80 for HTTP traffic
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+  SSLLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+      - CertificateArn: !Ref SSLCertificateARN
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref DefaultTargetGroup
+  ListenerRuleDefaultService:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - TargetGroupArn: !Ref DefaultTargetGroup
+        Type: forward
+      Conditions:
+      - Field: host-header
+        Values:
+        - !Ref ApplicationHostName
+      ListenerArn: !Ref LoadBalancerListener
+      Priority: 2
+  # A target group groups a bunch of backend instances that receive traffic from the load balancer. the health check ensures that only working backends are used.
+  DefaultTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      Name: !Sub ${AWS::StackName}
+      VpcId: !Ref VpcId
+      Port: 80
+      Protocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 10
+      Matcher:
+        HttpCode: 401
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}
+  # configuration ec2 instance for autoscaling
+  LaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            '/opt/docker-registry/docker-compose.yml':
+              content: !Sub |
+                version: "3.3"
+                services:
+                  nginx:
+                    image: nginx:alpine
+                    container_name: nginx
+                    restart: always
+                    ports:
+                      - "80:80"
+                    volumes:
+                      - /opt/nginx/nginx:/etc/nginx/conf.d/
+                      - /opt/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+                      - /opt/docker-registry/htpasswd:/etc/nginx/conf.d/nginx.htpasswd:ro
+                    links:
+                      - docker-registry:docker-registry
+                  docker-registry:
+                    image: {{docker_image}}
+                    deploy:
+                      replicas: 1
+                      restart_policy:
+                        condition: on-failure
+                    ports:
+                      - "5000:5000"
+                    volumes:
+                      - "/opt/docker-registry:/registry-conf"
+                      - /opt/docker-registry/config.yaml:/etc/docker/registry/config.yml:ro
+              context:
+                access_key:
+                  Ref: HostKeys
+                secret_key:
+                  Fn::GetAtt:
+                  - HostKeys
+                  - SecretAccessKey
+                s3_bucket: !Ref S3BucketName
+                s3_region: !Ref 'AWS::Region'
+                magic_string: fL3YHeP1cmCHH5FWm1PKaO7cdo0VXkabAgiSEestXYZDgAiQcDCsTiWpOaukB1e9
+                docker_image:
+                  Ref: DockerImage
+            '/opt/docker-registry/config.yaml':
+              # see more config here https://docs.docker.com/registry/configuration/
+              content: !Sub |
+                version: 0.1
+                log:
+                  fields:
+                    service: registry
+                storage:
+                  s3:
+                    accesskey: {{access_key}}
+                    secretkey: {{secret_key}}
+                    region: {{s3_region}}
+                    bucket: {{s3_bucket}}
+                    encrypt: true
+                http:
+                  addr: :5000
+                  headers:
+                    X-Content-Type-Options: [nosniff]
+                health:
+                  storagedriver:
+                    enabled: true
+                    interval: 10s
+                    threshold: 3
+              context:
+                access_key:
+                  Ref: HostKeys
+                secret_key:
+                  Fn::GetAtt:
+                  - HostKeys
+                  - SecretAccessKey
+                s3_bucket: !Ref S3BucketName
+                s3_region: !Ref 'AWS::Region'
+                magic_string: fL3YHeP1cmCHH5FWm1PKaO7cdo0VXkabAgiSEestXYZDgAiQcDCsTiWpOaukB1e9
+              mode: '000700'
+              owner: root
+              group: root
+            '/opt/nginx/nginx.conf':
+              content: !Sub |
+                events {
+                  worker_connections  1024;
+                }
+                http {
+                  upstream docker-registry {
+                    server docker-registry:5000;
+                  }
+
+                  ## Set a variable to help us decide if we need to add the
+                  ## 'Docker-Distribution-Api-Version' header.
+                  ## The registry always sets this header.
+                  ## In the case of nginx performing auth, the header will be unset
+                  ## since nginx is auth-ing before proxying.
+                  map $upstream_http_docker_distribution_api_version $docker_distribution_api_version {
+                      '' 'registry/2.0';
+                  }
+
+                  server {
+                    # Server options
+                    listen       80 default_server;
+                    listen       [::]:80 default_server;
+                    charset utf-8;
+                    client_max_body_size 0;
+
+                    # required to avoid HTTP 411: see Issue #1486 (https://github.com/moby/moby/issues/1486)
+                    chunked_transfer_encoding on;
+
+                    # server_name docker.cubbit.net;
+
+                    # Authentication
+                    auth_basic "Registry realm";
+                    auth_basic_user_file /etc/nginx/conf.d/nginx.htpasswd;
+
+                    # Proxy settings
+                    location / {
+                        # Do not allow connections from docker 1.5 and earlier
+                        # docker pre-1.6.0 did not properly set the user agent on ping, catch "Go *" user agents
+                        if ($http_user_agent ~ "^(docker\/1\.(3|4|5(?!\.[0-9]-dev))|Go ).*$" ) {
+                            return 404;
+                        }
+
+                        ## If $docker_distribution_api_version is empty, the header will not be added.
+                        ## See the map directive above where this variable is defined.
+                        add_header 'Docker-Distribution-Api-Version' $docker_distribution_api_version always;
+
+                        access_log /var/log/nginx/docker.log;
+                        proxy_pass http://docker-registry;
+                        proxy_set_header Host $host;
+                        proxy_read_timeout 900;
+                    }
+                  }
+                }
+              context:
+                domain_name:
+                  Ref: ApplicationHostName
+              mode: '000644'
+              owner: root
+              group: root
+            '/opt/docker-registry/htpasswd':
+              content:
+                Fn::Join:
+                  - '\n'
+                  - Ref: RegistryAuth
+              mode: '000644'
+              owner: root
+              group: root
+    Properties:
+      KeyName: !Ref KeyPairName
+      InstanceType: !Ref InstanceType
+      AssociatePublicIpAddress: true
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+      SecurityGroups:
+      - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -ex
+          # add sshkey of admin
+          echo "${KeygenText}">> \
+            /home/centos/.ssh/authorized_keys
+          yum update -y
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchConfiguration --region ${AWS::Region}
+          # Set up docker registry
+          docker-compose -f /opt/docker-registry/docker-compose.yml up -d
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      Tags:
+        - Key: 'Name'
+          Value: !Sub '${AWS::StackName}'
+          PropagateAtLaunch: true
+      DesiredCapacity: 1 # start with 1 instances
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      VPCZoneIdentifier: !Ref SubnetIds
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      TargetGroupARNs:
+      - !Ref DefaultTargetGroup
+    CreationPolicy: # wait up to 15 minutes to receive a success signal during instance startup
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy: # this allows rolling updates if a change requires new EC2 instances
+      AutoScalingRollingUpdate:
+        PauseTime: PT15M
+        WaitOnResourceSignals: true
+  # Increase the number of instances by 25% but at least by one not more often than every 10 minutes.
+  ScalingUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      MinAdjustmentStep: 1
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 600
+      ScalingAdjustment: 25
+  # Decrease the number of instances by 25% but at least by one one not more often than every 15 minutes.
+  ScalingDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      MinAdjustmentStep: 1
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: 900
+      ScalingAdjustment: -25
+  # Trigger the ScalingUpPolicy if the average CPU load of the past 5 minutes is higher than ThresholdCPUHigh (default: 70%)
+  CPUHighAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: !Ref ThresholdCPUHigh
+      AlarmDescription: 'CPU load is high.'
+      Period: 300
+      AlarmActions:
+      - !Ref ScalingUpPolicy
+      Namespace: 'AWS/EC2'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+  # Trigger the ScalingDownPolicy if the average CPU load of the past 5 minutes is lower than ThresholdCPULow (default: 30%) for 3 consecutive times
+  CPULowAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 3
+      Statistic: Average
+      Threshold: !Ref ThresholdCPULow
+      AlarmDescription: 'CPU load is low.'
+      Period: 300
+      AlarmActions:
+      - !Ref ScalingDownPolicy
+      Namespace: 'AWS/EC2'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
+  # Sends an alert if the average CPU load of the past 5 minutes is higher than ThresholdCPUTooHigh (default: 85%)
+  CPUTooHighAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: !Ref ThresholdCPUTooHigh
+      AlarmDescription: 'CPU load is too high.'
+      Period: 300
+      AlarmActions:
+      - !Ref Alerts
+      Namespace: 'AWS/EC2'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+  # Add route53 for docker-registry
+  ServiceEndpointDNS:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: "/hostedzone/Z1QZW6GPMNJF2T"
+      Name: !Ref ApplicationHostName
+      TTL: 300
+      ResourceRecords:
+      - !GetAtt LoadBalancer.DNSName
+      Type: CNAME
+
+Outputs:
+  DNSName:
+    Description: 'The DNS name for the load balancer.'
+    Value: !GetAtt 'LoadBalancer.DNSName'
+    Export:
+      Name: !Sub '${AWS::StackName}-DNSName'
+  # The URL is needed to run the acceptance test against the correct endpoint
+  URL:
+    Description: 'URL to the load balancer.'
+    Value: !Sub 'http://${LoadBalancer.DNSName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-URL'
+
+  LoadBalancerListener:
+    Description: A reference to a port 80 listener
+    Value: !Ref LoadBalancerListener
+
+  SSLLoadBalancerListener:
+    Description: A reference to a port 80 listener
+    Value: !Ref SSLLoadBalancerListener

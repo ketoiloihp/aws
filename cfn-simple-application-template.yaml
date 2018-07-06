@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'this is example create a simple application running php'
+Mappings:
+  RegionMap:
+    ap-northeast-1:
+      AMI: ami-25bd2743
+    ap-northeast-2:
+      AMI: ami-7248e81c
+    ap-southeast-1:
+      AMI: ami-d2fa88ae
+    ap-southeast-2:
+      AMI: ami-b6bb47d4
+Parameters:
+  Ec2KeyName:
+    Description: 'choose one keypair exist'
+    Type: AWS::EC2::KeyPair::KeyName
+  WelcomeMessage:
+    Description: 'Input text for display welcome message'
+    Type: String
+    MinLength: 1
+    Default: 'WelcomeMessage'
+  Ec2SubnetId:
+    Description: Subnet Identifier
+    Type: AWS::EC2::Subnet::Id
+  Ec2VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC Identifier
+Resources:
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Ec2VpcId
+      GroupDescription: "Enable HTTP access via port 80 locked down to the load balancer + SSH access"
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - CidrIp: <my_ip>/32
+        FromPort: '22'
+        IpProtocol: tcp
+        ToPort: '22'
+  WebServerInstance:
+    Type: 'AWS::EC2::Instance'
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          InstallAndRun:
+          - setupCfnHup
+          - install_services
+        setupCfnHup:
+          files:
+            '/etc/cfn/cfn-hup.conf':
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: '000400'
+              owner: root
+              group: root
+            '/etc/cfn/hooks.d/cfn-auto-reloader.conf':
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.EC2Instance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region} --configsets InstallAndRun
+                runas=root
+              mode: '000400'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                - '/etc/cfn/cfn-hup.conf'
+                - '/etc/cfn/hooks.d/cfn-auto-reloader.conf'    
+        install_services:
+          packages:
+            yum:
+              ntp: []
+              httpd: []
+              php: []
+          commands:
+            YumUpdate:
+              command: 'echo "Test" > /tmp/a.dump'
+          files:
+            '/var/www/html/index.php':
+              content: !Sub |
+                <?php
+                  echo "<h1>AWS CloudFormation sample PHP application 01</h1>";
+                  echo "<p>${WelcomeMessage} - a new message 123</p>";?>
+          services:
+            sysvinit:
+              ntpd:
+                enabled: true
+                ensureRunning: true
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref Ec2KeyName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          SubnetId: !Ref Ec2SubnetId
+          DeviceIndex: '0'
+          GroupSet:
+            - !Ref WebServerSecurityGroup
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sv2'
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -exv
+          yum update -y
+          # Install CFN helpers
+          yum install -y epel-release awscli python-pip lzop
+          /usr/bin/easy_install --script-dir /opt/aws/bin https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+          cp -v /usr/lib/python2*/site-packages/aws_cfn_bootstrap*/init/redhat/cfn-hup /etc/init.d
+          chmod +x /etc/init.d/cfn-hup
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region} --configsets InstallAndRun
+          # Signal the status from cfn-init (via $?)
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerInstance --region ${AWS::Region}
+       

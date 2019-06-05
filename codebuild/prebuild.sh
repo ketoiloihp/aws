@@ -3,10 +3,8 @@
 echo "=== Login to Amazon ECR ==="
 aws --version
 aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION
-# aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-# echo "AWS_ACCESS_KEY_ID:"$AWS_ACCESS_KEY_ID
-# aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-# echo "AWS_SECRET_ACCESS_KEY:"$AWS_SECRET_ACCESS_KEY
+aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 aws s3 ls s3://finos-codebuild-cache/
 aws s3 ls s3://finos.mvnrepository/
 echo "=== Generating Docker Image Name & Version ==="

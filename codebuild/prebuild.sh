@@ -6,7 +6,7 @@ aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION
 aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
 aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
 aws s3 ls s3://finos.mvnrepository/releases/com/finos/common/1.0.0/
-aws s3 cp s3://finos.mvnrepository/releases/com/finos/common/1.0.0/common-1.0.0.pom
+aws s3 cp s3://finos.mvnrepository/releases/com/finos/common/1.0.0/common-1.0.0.pom ./
 ls -al
 ls -al /root/
 ls -al /root/.aws/

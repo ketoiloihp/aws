@@ -14,7 +14,8 @@ export AWS_ECR_REPO=$AWS_REGISTRY_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 echo $AWS_ECR_REPO
 echo $DOCKER_IMAGE_NAME
 echo $DOCKER_IMAGE_VERSION
-
+echo "======="
+echo $(gradle properties -q | grep "^group:" | awk '{print $2}').$(gradle properties -q | grep "^name:" | awk '{print $2}')
 echo "=== Checking Docker Image Existence ==="
 aws ecr describe-images --repository-name $DOCKER_IMAGE_NAME --image-ids=imageTag=$DOCKER_IMAGE_VERSION --region $AWS_DEFAULT_REGION --registry-id $AWS_REGISTRY_ID 2> /dev/null
 if [[ $? == 0 ]]; then
